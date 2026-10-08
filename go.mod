@@ -102,6 +102,7 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/llm-d/llm-d-router => github.com/llm-d/llm-d-router v0.11.0-rc.2
+replace github.com/llm-d/llm-d-router => github.com/llm-d/llm-d-router v0.11.0
 
-// replace github.com/llm-d/llm-d-router => ./../../llm-d/llm-d-router
+//local replace
+//replace github.com/llm-d/llm-d-router => ./../../llm-d/llm-d-router
