@@ -143,9 +143,22 @@ func TestConfigValidate(t *testing.T) {
 		t.Fatal("Validate() = nil, want an error when EppGroup is empty")
 	}
 
-	// Configured group: valid.
-	if err := (Config{EppGroup: "g1"}).Validate(); err != nil {
+	// Configured group: valid once the positive pool-metrics intervals (flag
+	// defaults) are present.
+	if err := (Config{
+		EppGroup:                   "g1",
+		PoolMetricsFlushInterval:   5 * time.Second,
+		PoolMetricsStalenessWindow: 2 * time.Second,
+	}).Validate(); err != nil {
 		t.Fatalf("Validate() = %v, want nil for a configured group", err)
+	}
+
+	// Non-positive pool-metrics intervals are rejected.
+	if err := (Config{EppGroup: "g1", PoolMetricsStalenessWindow: 2 * time.Second}).Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for a non-positive pool-metrics-flush-interval")
+	}
+	if err := (Config{EppGroup: "g1", PoolMetricsFlushInterval: 5 * time.Second}).Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error for a non-positive pool-metrics-staleness-window")
 	}
 }
 

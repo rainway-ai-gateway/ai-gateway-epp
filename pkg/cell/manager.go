@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -46,6 +47,13 @@ type Options struct {
 	RefreshMetricsInterval   time.Duration
 	MaxPoolBufferSize        int
 	AllowExperimentalPlugins bool
+
+	// PoolMetricsFlushInterval is how often the per-cell inference-pool
+	// aggregate metrics are recomputed and exported.
+	PoolMetricsFlushInterval time.Duration
+	// PoolMetricsStalenessWindow is how old an endpoint's metrics may be to
+	// still count toward those aggregates.
+	PoolMetricsStalenessWindow time.Duration
 
 	// DrainTimeout bounds how long a replaced engine waits for in-flight
 	// requests before being dropped.
@@ -88,6 +96,12 @@ func NewManager(ctx context.Context, opts Options) *Manager {
 	if opts.DrainWorkers <= 0 {
 		opts.DrainWorkers = 4
 	}
+	if opts.PoolMetricsFlushInterval <= 0 {
+		opts.PoolMetricsFlushInterval = 5 * time.Second
+	}
+	if opts.PoolMetricsStalenessWindow <= 0 {
+		opts.PoolMetricsStalenessWindow = 2 * time.Second
+	}
 	m := &Manager{
 		opts:    opts,
 		logger:  opts.Logger.WithName("cell-manager"),
@@ -121,6 +135,11 @@ func (m *Manager) defaultNewCell(ctx context.Context, key Key) (*Cell, error) {
 	rt := datalayer.NewRuntime(m.opts.RefreshMetricsInterval)
 	pool := datalayer.NewEndpointPool(m.opts.PoolNamespace, string(key))
 	ds := datastore.NewDatastore(cellCtx, rt).WithEndpointPool(pool)
+
+	// Pool aggregate metrics (ready_endpoints, average_*, std_dev_*), flushed
+	// per cell and torn down with cellCtx.
+	datalayerlogger.StartMetricsLogger(cellCtx, ds, m.opts.PoolMetricsFlushInterval, m.opts.PoolMetricsStalenessWindow)
+
 	return &Cell{
 		Key:    key,
 		ds:     ds,
