@@ -17,6 +17,8 @@ package cell
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
 var (
@@ -48,4 +50,49 @@ var (
 
 func init() {
 	ctrlmetrics.Registry.MustRegister(engineReloads, engineCurrentVersion, cellStateGauge, drainDuration)
+}
+
+var perEndpointQueueSizeDesc = prometheus.NewDesc(
+	"ai_epp_per_endpoint_queue_size",
+	"Current number of requests waiting in the model-server queue, per endpoint, per cluster.",
+	[]string{"cluster", "inference_pool", "model_server_endpoint"},
+	nil,
+)
+
+// perEndpointQueueSizeCollector is a process-wide collector that snapshots every
+// live cell at scrape time. Registering it once avoids the duplicate-Desc panic
+// and the sync.Once pitfalls of per-cell registration.
+type perEndpointQueueSizeCollector struct {
+	cells func() []*Cell
+}
+
+var _ prometheus.Collector = (*perEndpointQueueSizeCollector)(nil)
+
+func (c *perEndpointQueueSizeCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- perEndpointQueueSizeDesc
+}
+
+func (c *perEndpointQueueSizeCollector) Collect(ch chan<- prometheus.Metric) {
+	for _, cell := range c.cells() {
+		pool, err := cell.ds.PoolGet()
+		if err != nil {
+			continue // pool not synced yet; emit nothing
+		}
+		for _, ep := range cell.ds.PodList(datastore.AllPodsPredicate) {
+			ch <- prometheus.MustNewConstMetric(
+				perEndpointQueueSizeDesc,
+				prometheus.GaugeValue,
+				float64(ep.GetMetrics().WaitingQueueSize),
+				string(cell.Key),
+				pool.Name,
+				ep.GetMetadata().ID.Name,
+			)
+		}
+	}
+}
+
+// NewPerEndpointQueueSizeCollector builds the process-wide per-endpoint queue
+// collector. cells is called on every scrape and must return a snapshot.
+func NewPerEndpointQueueSizeCollector(cells func() []*Cell) prometheus.Collector {
+	return &perEndpointQueueSizeCollector{cells: cells}
 }
