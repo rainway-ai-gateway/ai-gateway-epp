@@ -11,6 +11,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [v0.3.0-preview.1] - 2026-10-20
+
+### Added
+- Export llm-d EPP metrics (`llm_d_epp_*`) on `:9004`: register the upstream collectors at startup, start the per-cell inference-pool aggregate flush loop, and emit `ai_epp_per_endpoint_queue_size{cluster,inference_pool,model_server_endpoint}` across all live cells; add `-fairness-id-metric-label-limit`, `-pool-metrics-flush-interval` and `-pool-metrics-staleness-window`.
+- Add container image build support (`Dockerfile`, `make docker` / `make docker-push`) with multi-arch `buildx`, version/commit injection, a non-root runtime user and bundled sample config.
+
+### Changed
+- **Breaking** Assignment granularity switches from instances to groups: `epp_data/config` `assignment[cluster]` is now `{group}` instead of `{primary, standby}`, and the `cell.Role` primary/standby model is removed. ai-gateway-epp and ai-gateway-api must be upgraded together (mismatched versions fail loudly via `ai_epp_assignment_no_match`).
+- **Breaking** Replace `-instance-id` / `AI_GATEWAY_EPP_INSTANCE_ID` with the required `-epp-group` / `AI_GATEWAY_EPP_GROUP`; the process refuses to start when the group is unset, and a group with no matching assignment reports `ai_epp_assignment_no_match`.
+- Upgrade `llm-d-router` to stable v0.11.0.
+- Build/packaging layout is now `output/bin/epp` + `output/conf`; `make release` produces `dist/epp_<version>_linux_<arch>.tar.gz` for amd64/arm64, and `make clean` keeps the tracked `conf/`.
+
 ## [v0.0.2] - 2026-09-24
 
 ### Added
@@ -32,5 +44,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - gRPC ext-proc and health servers with optional server-side TLS, a Kubernetes-style readiness gate, Prometheus metrics, and optional pprof on the metrics port.
 - End-to-end integration tests against a fake InnerAPI.
 
+[v0.3.0-preview.1]: https://github.com/rainway-ai-gateway/ai-gateway-epp/releases/tag/v0.3.0-preview.1
 [v0.0.2]: https://github.com/rainway-ai-gateway/ai-gateway-epp/releases/tag/v0.0.2
 [v0.0.1]: https://github.com/rainway-ai-gateway/ai-gateway-epp/releases/tag/v0.0.1
