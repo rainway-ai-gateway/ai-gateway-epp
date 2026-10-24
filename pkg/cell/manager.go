@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/llm-d/llm-d-router/pkg/epp/datalayer"
+	datalayerlogger "github.com/llm-d/llm-d-router/pkg/epp/datalayer/logger"
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 )
@@ -47,6 +48,13 @@ type Options struct {
 	MaxPoolBufferSize        int
 	AllowExperimentalPlugins bool
 
+	// PoolMetricsFlushInterval is how often the per-cell inference-pool
+	// aggregate metrics are recomputed and exported.
+	PoolMetricsFlushInterval time.Duration
+	// PoolMetricsStalenessWindow is how old an endpoint's metrics may be to
+	// still count toward those aggregates.
+	PoolMetricsStalenessWindow time.Duration
+
 	// DrainTimeout bounds how long a replaced engine waits for in-flight
 	// requests before being dropped.
 	DrainTimeout time.Duration
@@ -61,7 +69,7 @@ type Options struct {
 }
 
 // Manager owns the Cell registry and lifecycle transitions driven by the
-// epp_data watcher (roles) and its per-cell engine hot-swaps.
+// epp_data watcher (assignment hits) and its per-cell engine hot-swaps.
 type Manager struct {
 	opts    Options
 	logger  logr.Logger
@@ -87,6 +95,12 @@ func NewManager(ctx context.Context, opts Options) *Manager {
 	}
 	if opts.DrainWorkers <= 0 {
 		opts.DrainWorkers = 4
+	}
+	if opts.PoolMetricsFlushInterval <= 0 {
+		opts.PoolMetricsFlushInterval = 5 * time.Second
+	}
+	if opts.PoolMetricsStalenessWindow <= 0 {
+		opts.PoolMetricsStalenessWindow = 2 * time.Second
 	}
 	m := &Manager{
 		opts:    opts,
@@ -121,6 +135,11 @@ func (m *Manager) defaultNewCell(ctx context.Context, key Key) (*Cell, error) {
 	rt := datalayer.NewRuntime(m.opts.RefreshMetricsInterval)
 	pool := datalayer.NewEndpointPool(m.opts.PoolNamespace, string(key))
 	ds := datastore.NewDatastore(cellCtx, rt).WithEndpointPool(pool)
+
+	// Pool aggregate metrics (ready_endpoints, average_*, std_dev_*), flushed
+	// per cell and torn down with cellCtx.
+	datalayerlogger.StartMetricsLogger(cellCtx, ds, m.opts.PoolMetricsFlushInterval, m.opts.PoolMetricsStalenessWindow)
+
 	return &Cell{
 		Key:    key,
 		ds:     ds,
@@ -150,69 +169,26 @@ func (m *Manager) List() []*Cell {
 	return out
 }
 
-// Ensure returns the cell for key, creating it if needed, and applies the
-// requested role.
-func (m *Manager) Ensure(ctx context.Context, key Key, role Role) (*Cell, error) {
+// Ensure returns the cell for key, creating it if needed. Assignment
+// resolution is binary: a held cell always serves (single-instance group
+// model). Ensure is idempotent.
+func (m *Manager) Ensure(ctx context.Context, key Key) (*Cell, error) {
 	c, ok := m.Get(key)
-	if !ok {
-		nc, err := m.newCell(ctx, key)
-		if err != nil {
-			return nil, fmt.Errorf("create cell %s: %w", key, err)
-		}
-		nc.setState(StateCreating)
-		actual, loaded := m.cells.LoadOrStore(key, nc)
-		if loaded {
-			nc.Close()
-			c = actual.(*Cell)
-		} else {
-			c = nc
-			m.logger.Info("cell created", "cell", string(key))
-		}
+	if ok {
+		return c, nil
 	}
-
-	switch {
-	case c.Role() == role:
-		// no-op
-	case role == RolePrimary:
-		m.Promote(key)
-		m.logger.V(2).Info("role transition", "cell", string(key), "role", "primary")
-	case role == RoleStandby:
-		if c.Role() == RoleNone {
-			c.setRole(RoleStandby)
-			m.logger.V(2).Info("role transition", "cell", string(key), "role", "standby")
-		} else {
-			m.Demote(key)
-			m.logger.V(2).Info("role transition", "cell", string(key), "role", "standby(demoted)")
-		}
+	nc, err := m.newCell(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("create cell %s: %w", key, err)
 	}
-	return c, nil
-}
-
-// Promote flips a cell to serving.
-func (m *Manager) Promote(key Key) {
-	c, ok := m.Get(key)
-	if !ok || c.State() == StateDraining {
-		return
+	nc.setState(StateCreating)
+	actual, loaded := m.cells.LoadOrStore(key, nc)
+	if loaded {
+		nc.Close()
+		return actual.(*Cell), nil
 	}
-	c.setRole(RolePrimary)
-	if c.State() == StateStandby || c.State() == StateCreating {
-		c.setState(StatePrimary)
-	}
-}
-
-// Demote drains the current engine but keeps the data plane hot.
-func (m *Manager) Demote(key Key) {
-	c, ok := m.Get(key)
-	if !ok || c.State() == StateDraining {
-		return
-	}
-	c.setRole(RoleStandby)
-	if c.State() == StatePrimary {
-		c.setState(StateStandby)
-	}
-	if eng := c.Engine(); eng != nil {
-		m.scheduleDrain(c, eng, false)
-	}
+	m.logger.Info("cell created", "cell", string(key))
+	return nc, nil
 }
 
 // Drop drains the engine and releases the data plane.

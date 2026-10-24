@@ -28,7 +28,9 @@ import (
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/stdr"
+	metricsutil "github.com/llm-d/llm-d-router/pkg/common/observability/metrics"
 	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
+	eppmetrics "github.com/llm-d/llm-d-router/pkg/epp/metrics"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -69,6 +71,10 @@ func run() error {
 		return nil
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
 	//stdlf := stdlog.LstdFlags | stdlog.Lshortfile
 	stdlf := stdlog.LstdFlags | stdlog.Llongfile
 	stdl := stdlog.New(os.Stderr, "", stdlf)
@@ -86,6 +92,13 @@ func run() error {
 	hub := clustertable.NewHub()
 	registerPlugins(hub)
 
+	// Register llm-d EPP metric collectors into the controller-runtime registry
+	// that the /metrics server exposes. Without this, none of the llm_d_epp_*
+	// metrics are exported even though Record* functions are called at runtime.
+	metricsutil.SetFairnessIDLabelLimit(cfg.FairnessIDMetricLabelLimit)
+	eppmetrics.Register()
+	eppmetrics.RecordInferenceExtensionInfo(commit, version)
+
 	manager := cell.NewManager(ctx, cell.Options{
 		Logger:                   logger,
 		MetricsRecorder:          ctrlmetrics.Registry,
@@ -93,7 +106,15 @@ func run() error {
 		RefreshMetricsInterval:   cfg.RefreshMetricsInterval,
 		DrainTimeout:             cfg.EngineDrainTimeout,
 		AllowExperimentalPlugins: cfg.AllowExperimentalPlugins,
+
+		PoolMetricsFlushInterval:   cfg.PoolMetricsFlushInterval,
+		PoolMetricsStalenessWindow: cfg.PoolMetricsStalenessWindow,
 	})
+
+	// Process-wide per-endpoint queue metric, snapshotted across all live cells.
+	ctrlmetrics.Registry.MustRegister(
+		cell.NewPerEndpointQueueSizeCollector(func() []*cell.Cell { return manager.List() }),
+	)
 
 	var discoverySrc poller.Source[map[string][]fwkdl.EndpointMetadata]
 	var eppDataSrc poller.Source[innerapi.EppDataConfig]
@@ -108,7 +129,7 @@ func run() error {
 			_, ok := manager.Get(cell.Key(cluster))
 			return ok
 		}, nil)
-		eppData := poller.NewEppDataWatcher(nil, cfg.InstanceID, manager, logger)
+		eppData := poller.NewEppDataWatcher(nil, cfg.EppGroup, manager, logger)
 
 		discoveryHandle = discovery.Handle
 		eppDataHandle = eppData.Handle
@@ -119,7 +140,7 @@ func run() error {
 			_, ok := manager.Get(cell.Key(cluster))
 			return ok
 		}, nil)
-		eppData := poller.NewEppDataWatcher(client, cfg.InstanceID, manager, logger)
+		eppData := poller.NewEppDataWatcher(client, cfg.EppGroup, manager, logger)
 
 		discoverySrc = discovery
 		eppDataSrc = eppData
@@ -198,7 +219,7 @@ func run() error {
 
 	logger.Info("epp started",
 		"version", version,
-		"instance", cfg.InstanceID,
+		"eppGroup", cfg.EppGroup,
 		"grpcPort", cfg.GRPCPort,
 		"healthPort", cfg.HealthPort,
 		"metricsPort", cfg.MetricsPort,
